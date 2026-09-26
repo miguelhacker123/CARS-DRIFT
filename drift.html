@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Drift Racer</title>
+<style>
+  body {
+    margin: 0;
+    background: #1a1a1a;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    font-family: Arial, sans-serif;
+    overflow: hidden;
+  }
+  canvas { background: #2c3e50; border-radius: 8px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="600"></canvas>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+// ========== CARRO ==========
+const car = {
+  x: W/2,
+  y: H/2,
+  angle: 0,          // direção que o carro aponta
+  speed: 0,          // velocidade atual
+  maxSpeed: 6,
+  accel: 0.15,
+  friction: 0.96,
+  turnSpeed: 0.06,
+  driftFactor: 0.15, // quanto derrapa (0 = sem drift, 1 = muito)
+  vx: 0,             // velocidade real no eixo X
+  vy: 0,             // velocidade real no eixo Y
+  w: 30,
+  h: 50
+};
+
+// ========== CONTROLES ==========
+const keys = {};
+document.addEventListener("keydown", e => {
+  keys[e.key] = true;
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+});
+document.addEventListener("keyup", e => keys[e.key] = false);
+
+// ========== PONTUAÇÃO ==========
+let score = 0;
+let driftScore = 0;
+let driftTimer = 0;
+let isDrifting = false;
+let driftMultiplier = 1;
+
+// ========== PARTÍCULAS DE FUMAÇA ==========
+let particles = [];
+function spawnSmoke(x, y) {
+  for (let i = 0; i < 2; i++) {
+    particles.push({
+      x: x + (Math.random()-0.5) * 15,
+      y: y + (Math.random()-0.5) * 15,
+      size: 5 + Math.random() * 8,
+      life: 1,
+      vx: (Math.random()-0.5) * 1.5,
+      vy: (Math.random()-0.5) * 1.5
+    });
+  }
+}
+
+// ========== PISTA (obstáculos) ==========
+const obstacles = [
+  // Blocos internos formando uma pista
+  { x: 150, y: 150, w: 500, h: 30 },
+  { x: 150, y: 420, w: 500, h: 30 },
+  { x: 150, y: 150, w: 30, h: 300 },
+  { x: 620, y: 150, w: 30, h: 300 },
+  // Obstáculos no meio
+  { x: 350, y: 260, w: 100, h: 80 },
+];
+
+function drawTrack() {
+  // Grama
+  ctx.fillStyle = "#27ae60";
+  ctx.fillRect(0, 0, W, H);
+
+  // Asfalto (toda a área jogável)
+  ctx.fillStyle = "#34495e";
+  ctx.fillRect(80, 80, W - 160, H - 160);
+
+  // Linhas decorativas
+  ctx.strokeStyle = "#ecf0f1";
+  ctx.lineWidth = 4;
+  ctx.setLineDash([20, 20]);
+  ctx.strokeRect(100, 100, W - 200, H - 200);
+  ctx.setLineDash([]);
+
+  // Obstáculos
+  ctx.fillStyle = "#7f8c8d";
+  obstacles.forEach(o => {
+    ctx.fillRect(o.x, o.y, o.w, o.h);
+    ctx.strokeStyle = "#2c3e50";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(o.x, o.y, o.w, o.h);
+  });
+}
+
+// Colisão simples AABB
+function collides(x, y, w, h) {
+  for (const o of obstacles) {
+    if (x < o.x + o.w && x + w > o.x && y < o.y + o.h && y + h > o.y) return true;
+  }
+  // Fora da tela
+  if (x < 0 || x + w > W || y < 0 || y + h > H) return true;
+  return false;
+}
+
+// ========== UPDATE ==========
+function update() {
+  // Aceleração
+  if (keys["ArrowUp"] || keys["w"] || keys["W"]) car.speed += car.accel;
+  if (keys["ArrowDown"] || keys["s"] || keys["S"]) car.speed -= car.accel;
+
+  // Atrito
+  car.speed *= car.friction;
+  if (Math.abs(car.speed) < 0.05) car.speed = 0;
+
+  // Limite de velocidade
+  car.speed = Math.max(-car.maxSpeed/2, Math.min(car.maxSpeed, car.speed));
+
+  // Direção (só vira se estiver andando)
+  const turn = car.turnSpeed * (car.speed / car.maxSpeed);
+  if (keys["ArrowLeft"] || keys["a"] || keys["A"]) car.angle -= turn;
+  if (keys["ArrowRight"] || keys["d"] || keys["D"]) car.angle += turn;
+
+  // Velocidade desejada (direção que o carro aponta)
+  const targetVx = Math.cos(car.angle) * car.speed;
+  const targetVy = Math.sin(car.angle) * car.speed;
+
+  // Interpolação: drift = a velocidade real "atrasa" em relação à direção
+  car.vx += (targetVx - car.vx) * (1 - car.driftFactor);
+  car.vy += (targetVy - car.vy) * (1 - car.driftFactor);
+
+  // Nova posição
+  const newX = car.x + car.vx;
+  const newY = car.y + car.vy;
+
+  // Colisão
+  if (!collides(newX - car.w/2, newY - car.h/2, car.w, car.h)) {
+    car.x = newX;
+    car.y = newY;
+  } else {
+    // Bate e perde velocidade
+    car.vx *= -0.3;
+    car.vy *= -0.3;
+    car.speed *= 0.5;
+  }
+
+  // ========== DETECTAR DRIFT ==========
+  // Diferença entre direção apontada e direção real do movimento
+  const realAngle = Math.atan2(car.vy, car.vx);
+  let angleDiff = Math.abs(car.angle - realAngle);
+  // Normalizar
+  while (angleDiff > Math.PI) angleDiff = Math.abs(angleDiff - Math.PI * 2);
+
+  const speedMag = Math.hypot(car.vx, car.vy);
+  const drifting = angleDiff > 0.3 && speedMag > 2;
+
+  if (drifting) {
+    if (!isDrifting) {
+      isDrifting = true;
+      driftMultiplier = 1;
+    }
+    driftTimer += 1;
+    driftScore += Math.floor(speedMag * 5 * driftMultiplier);
+    driftMultiplier = Math.min(5, 1 + driftTimer / 60);
+
+    // Fumaça nas rodas
+    const backX = car.x - Math.cos(car.angle) * 20;
+    const backY = car.y - Math.sin(car.angle) * 20;
+    spawnSmoke(backX, backY);
+  } else {
+    if (isDrifting && driftScore > 0) {
+      score += driftScore;
+      driftScore = 0;
+    }
+    isDrifting = false;
+    driftTimer = 0;
+  }
+
+  // Partículas
+  particles.forEach(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= 0.02;
+    p.size += 0.2;
+  });
+  particles = particles.filter(p => p.life > 0);
+}
+
+// ========== DRAW ==========
+function drawCar() {
+  ctx.save();
+  ctx.translate(car.x, car.y);
+  ctx.rotate(car.angle);
+
+  // Sombra
+  ctx.fillStyle = "rgba(0,0,0,0.3)";
+  ctx.fillRect(-car.w/2 + 3, -car.h/2 + 3, car.w, car.h);
+
+  // Corpo
+  ctx.fillStyle = "#e74c3c";
+  ctx.fillRect(-car.w/2, -car.h/2, car.w, car.h);
+
+  // Detalhes
+  ctx.fillStyle = "#c0392b";
+  ctx.fillRect(-car.w/2, -car.h/2, car.w, 8); // capô
+  ctx.fillRect(-car.w/2, car.h/2 - 8, car.w, 8); // porta-malas
+
+  // Para-brisa
+  ctx.fillStyle = "#3498db";
+  ctx.fillRect(-car.w/2 + 4, -8, car.w - 8, 16);
+
+  // Rodas
+  ctx.fillStyle = "#111";
+  ctx.fillRect(-car.w/2 - 3, -car.h/2 + 5, 6, 12);
+  ctx.fillRect(car.w/2 - 3, -car.h/2 + 5, 6, 12);
+  ctx.fillRect(-car.w/2 - 3, car.h/2 - 17, 6, 12);
+  ctx.fillRect(car.w/2 - 3, car.h/2 - 17, 6, 12);
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillRect(10, 10, 220, 100);
+  ctx.strokeStyle = "white";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(10, 10, 220, 100);
+
+  ctx.fillStyle = "white";
+  ctx.font = "bold 18px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Pontos: " + score, 25, 40);
+  ctx.fillText("Velocidade: " + Math.floor(Math.hypot(car.vx, car.vy) * 20), 25, 65);
+
+  // Drift em andamento
+  if (isDrifting) {
+    ctx.fillStyle = "#f1c40f";
+    ctx.font = "bold 22px Arial";
+    ctx.fillText("DRIFT! x" + driftMultiplier.toFixed(1), 25, 95);
+    ctx.fillText("+" + driftScore, 25, 120);
+  }
+}
+
+// ========== LOOP ==========
+function loop() {
+  update();
+
+  // Rastro da pista (efeito motion blur)
+  ctx.fillStyle = "rgba(0,0,0,0.15)";
+  ctx.fillRect(0, 0, W, H);
+
+  drawTrack();
+
+  // Partículas
+  particles.forEach(p => {
+    ctx.fillStyle = `rgba(200, 200, 200, ${p.life * 0.6})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  drawCar();
+  drawHUD();
+
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
